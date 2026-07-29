@@ -10,7 +10,7 @@ Publish a student project through the training-camp deployment control plane. Ke
 ## Safety boundary
 
 - Never request, read, copy, print, or store an SSH key, DNS AccessKey, model API key, platform admin password, or reusable deployment token.
-- Never add a secret to the project, this Skill, a prompt, a screenshot, or a Gitee commit.
+- Never add a secret to the project, this Skill, a prompt, a screenshot, or a Git commit.
 - Build locally and upload only static output. Do not upload `.env`, source credentials, databases, Dockerfiles, Compose files, private keys, or server processes.
 - Treat the browser device code as a one-time authorization. Keep it in process memory only and let it expire after use.
 - Stop if preflight reports a suspected secret. Help the learner remove the secret or replace the integration with `/__camp/ai/chat`.
