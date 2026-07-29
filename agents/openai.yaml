@@ -1,0 +1,4 @@
+interface:
+  display_name: "训练营一键部署"
+  short_description: "安全部署训练营静态项目、获得稳定域名并使用无密钥 AI 网关"
+  default_prompt: "Use $cytopia-deploy to build and deploy this project to the Cytopia Summer Camp server."
