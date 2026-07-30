@@ -22,6 +22,7 @@ from preflight import (
     collect_files,
     collect_static_files,
     detect_plan,
+    normalize_healthcheck,
     scan_for_local_secret_files,
 )
 
@@ -251,7 +252,9 @@ def main() -> int:
     if args.entrypoint:
         plan = replace(plan, entrypoint=args.entrypoint)
     if args.healthcheck:
-        plan = replace(plan, healthcheck=args.healthcheck)
+        plan = replace(plan, healthcheck=normalize_healthcheck(args.healthcheck))
+    else:
+        plan = replace(plan, healthcheck=normalize_healthcheck(plan.healthcheck))
     if args.dist:
         output_dir = args.dist if args.dist.is_absolute() else project_dir / args.dist
         build_command = args.build_command

@@ -168,12 +168,19 @@ def detect_database(text: str) -> str:
     return "none"
 
 
+def normalize_healthcheck(value: str) -> str:
+    normalized = "/" + value.strip().lstrip("/")
+    if "\\" in normalized or ".." in normalized or "?" in normalized or "#" in normalized:
+        raise ValueError(f"无效的健康检查路径：{value}")
+    return normalized
+
+
 def detect_healthcheck(project_dir: Path) -> str:
     for path in project_dir.rglob("*"):
         if path.is_file() and path.suffix.lower() in {".py", ".js", ".jsx", ".ts", ".tsx"}:
             text = path.read_text(encoding="utf-8", errors="ignore")
             if re.search(r"""["']/health(?:z)?["']""", text):
-                return "/healthz" if "/healthz" in text else "/health"
+                return normalize_healthcheck("/healthz" if "/healthz" in text else "/health")
     return "/"
 
 
@@ -205,6 +212,11 @@ def detect_plan(project_dir: Path) -> DeployPlan:
         dependencies = {**package.get("dependencies", {}), **package.get("devDependencies", {})}
         dynamic = {"express", "fastify", "koa", "next", "@nestjs/core", "hono"}
         if dynamic.intersection(dependencies) and package.get("scripts", {}).get("start"):
+            if "next" in dependencies and not any(
+                (project_dir / path).is_dir()
+                for path in ("app", "pages", "src/app", "src/pages")
+            ):
+                raise ValueError("Next.js 项目缺少 app or pages 页面目录")
             return DeployPlan("fullstack", "node", detect_database(" ".join(dependencies)), "package.json", detect_healthcheck(project_dir))
         if "build" not in package.get("scripts", {}):
             raise ValueError("package.json 没有 build 或可运行的 start 脚本")

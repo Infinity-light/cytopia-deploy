@@ -10,6 +10,7 @@ from preflight import (
     collect_files,
     collect_static_files,
     detect_plan,
+    normalize_healthcheck,
     scan_for_local_secret_files,
 )
 
@@ -80,6 +81,20 @@ def test_node_mysql_detection_and_infrastructure_files_are_excluded(tmp_path: Pa
     assert plan.preset == "node"
     assert plan.database == "mysql"
     assert "Dockerfile" not in {item.relative.as_posix() for item in files}
+
+
+def test_next_detection_rejects_incomplete_source_tree(tmp_path: Path):
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"build":"next build","start":"next start"},"dependencies":{"next":"16"}}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="app or pages"):
+        detect_plan(tmp_path)
+
+
+def test_healthcheck_normalizes_duplicate_leading_slashes():
+    assert normalize_healthcheck("//api/auth/me") == "/api/auth/me"
 
 
 def test_device_flow_recovers_once_from_missing_code(monkeypatch):
