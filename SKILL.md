@@ -15,6 +15,17 @@ Publish a student project through the training-camp deployment control plane. Ke
 - Treat the browser device code as a one-time authorization. Keep it in process memory only and let it expire after use.
 - Stop if preflight reports a suspected secret. Help the learner remove the secret or replace the integration with `/__camp/ai/chat`.
 
+## Learner interaction contract
+
+The learner experience is **one prompt, one browser confirmation, one live URL**.
+
+- Own project inspection, project-name inference, build selection, output-directory detection, preflight, packaging, device-flow startup, upload, progress polling, online verification, and ordinary failure diagnosis.
+- Do not turn those internal actions into a checklist for the learner. Do not ask the learner to write a manifest, choose `dist/` versus `build/`, run the deployment client, copy a token into chat, configure a domain, or test a technical endpoint.
+- Ask a clarifying question only when two genuinely different projects or output directories remain plausible after inspection. Otherwise make the safe choice and proceed.
+- The only expected learner action during a normal deployment is confirming their training-camp identity in the browser. The learner never gives the agent an account password or infrastructure credential.
+- After publication, perform the verification yourself and return a short result: live URL, deployment ID, checks passed, and any learner-visible limitation.
+- For a later release, interpret “重新部署当前项目” as the same workflow. Reuse the stable hostname automatically.
+
 ## Deploy workflow
 
 1. Inspect the project and identify its static output:
@@ -35,6 +46,8 @@ Publish a student project through the training-camp deployment control plane. Ke
    - a deep link falls back to `index.html` for SPA projects;
    - `GET /__camp/ai/health` reports the project and AI availability when the app needs AI.
 6. On failure, read the reported stage and use [references/troubleshooting.md](references/troubleshooting.md). Fix the project, then request a new device code and redeploy.
+
+Treat steps 1–6 as internal Skill execution. Summarize them after completion; never assign them to the learner as homework.
 
 ## AI gateway contract
 
