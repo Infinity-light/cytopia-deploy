@@ -80,3 +80,20 @@ def test_node_mysql_detection_and_infrastructure_files_are_excluded(tmp_path: Pa
     assert plan.preset == "node"
     assert plan.database == "mysql"
     assert "Dockerfile" not in {item.relative.as_posix() for item in files}
+
+
+def test_device_flow_recovers_once_from_missing_code(monkeypatch):
+    import deploy
+
+    responses = iter(
+        [
+            (201, {"ok": True, "data": {"device_code": "first", "user_code": "AAAA-BBBB", "verification_uri": "https://example/first", "expires_in": 60, "interval": 2}}),
+            (404, {"ok": False, "error": {"message": "设备码不存在"}}),
+            (201, {"ok": True, "data": {"device_code": "second", "user_code": "CCCC-DDDD", "verification_uri": "https://example/second", "expires_in": 60, "interval": 2}}),
+            (200, {"ok": True, "data": {"authorized": True}}),
+        ]
+    )
+    monkeypatch.setattr(deploy, "request_json", lambda *_args, **_kwargs: next(responses))
+    monkeypatch.setattr(deploy.time, "sleep", lambda _seconds: None)
+
+    assert deploy.authorize("https://example", open_browser=False) == "second"

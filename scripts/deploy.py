@@ -160,7 +160,7 @@ def upload_archive(api_base: str, device_code: str, manifest: dict, archive: Pat
         return api_data(exc.code, payload)
 
 
-def authorize(api_base: str, *, open_browser: bool) -> str:
+def authorize(api_base: str, *, open_browser: bool, recovery_attempts: int = 1) -> str:
     status, response = request_json("POST", f"{api_base}/api/deploy/device/start")
     device = api_data(status, response)
     print(f"\n设备码：{device['user_code']}", flush=True)
@@ -177,8 +177,15 @@ def authorize(api_base: str, *, open_browser: bool) -> str:
             f"{api_base}/api/deploy/device/token",
             payload={"device_code": device["device_code"]},
         )
-        if poll_status == 410:
-            raise RuntimeError("设备码已过期，请重新部署")
+        if poll_status in {404, 410}:
+            if recovery_attempts > 0:
+                print("[auth] 设备码已失效，正在自动申请新的授权码。", flush=True)
+                return authorize(
+                    api_base,
+                    open_browser=open_browser,
+                    recovery_attempts=recovery_attempts - 1,
+                )
+            raise RuntimeError("设备码不存在或已过期，请重新部署")
         polled = api_data(poll_status, poll_response)
         if polled["authorized"]:
             print("[auth] 已授权，开始上传。", flush=True)
