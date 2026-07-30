@@ -14,9 +14,16 @@ import urllib.request
 import uuid
 import webbrowser
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
-from preflight import collect_static_files, scan_for_local_secret_files
+from preflight import (
+    DeployPlan,
+    collect_files,
+    collect_static_files,
+    detect_plan,
+    scan_for_local_secret_files,
+)
 
 DEFAULT_API_BASE = os.getenv("CYTOPIA_DEPLOY_API", "https://summercamp.godpenai.com").rstrip("/")
 TERMINAL_STATUSES = {"published", "failed"}
@@ -204,6 +211,10 @@ def main() -> int:
     parser.add_argument("--project-name", required=True)
     parser.add_argument("--dist", type=Path)
     parser.add_argument("--build-command")
+    parser.add_argument("--preset", choices=("static", "fastapi", "flask", "node"))
+    parser.add_argument("--database", choices=("auto", "none", "sqlite", "postgresql", "mysql"), default="auto")
+    parser.add_argument("--entrypoint")
+    parser.add_argument("--healthcheck")
     parser.add_argument("--api-base", default=DEFAULT_API_BASE)
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -217,17 +228,36 @@ def main() -> int:
             "项目包含禁止上传的密钥文件：" + ", ".join(secret_files)
             + "。请移除密钥并改用 /__camp/ai/chat。"
         )
+    plan = detect_plan(project_dir)
+    if args.preset:
+        plan = DeployPlan(
+            kind="static" if args.preset == "static" else "fullstack",
+            preset=args.preset,
+            database=plan.database,
+            entrypoint=args.entrypoint or plan.entrypoint,
+            healthcheck=args.healthcheck or plan.healthcheck,
+            build_command=plan.build_command if args.preset == "static" else None,
+            output_dir=plan.output_dir if args.preset == "static" else None,
+        )
+    if args.database != "auto":
+        plan = replace(plan, database=args.database)
+    if args.entrypoint:
+        plan = replace(plan, entrypoint=args.entrypoint)
+    if args.healthcheck:
+        plan = replace(plan, healthcheck=args.healthcheck)
     if args.dist:
         output_dir = args.dist if args.dist.is_absolute() else project_dir / args.dist
         build_command = args.build_command
+        plan = replace(plan, kind="static", preset="static", database="none", output_dir=output_dir)
     else:
-        detected_command, output_dir = detect_build(project_dir)
-        build_command = args.build_command if args.build_command is not None else detected_command
+        output_dir = plan.output_dir or project_dir
+        build_command = args.build_command if args.build_command is not None else plan.build_command
     run_build(build_command, project_dir)
-    files = collect_static_files(output_dir)
+    files = collect_static_files(output_dir) if plan.kind == "static" else collect_files(project_dir, kind="fullstack")
     total_bytes = sum(item.size for item in files)
     print(
-        f"[preflight] PASS files={len(files)} bytes={total_bytes} output={output_dir}",
+        f"[preflight] PASS kind={plan.kind} preset={plan.preset} database={plan.database} "
+        f"files={len(files)} bytes={total_bytes} source={output_dir}",
         flush=True,
     )
 
@@ -241,13 +271,23 @@ def main() -> int:
                 "files": len(files),
                 "bytes": total_bytes,
                 "archive_bytes": archive.stat().st_size,
+                "kind": plan.kind,
+                "preset": plan.preset,
+                "database": plan.database,
+                "entrypoint": plan.entrypoint,
             }
             print(json.dumps(result, ensure_ascii=False) if args.json else "本地预检完成，未上传。")
             return 0
         device_code = authorize(args.api_base.rstrip("/"), open_browser=not args.no_open)
         manifest = {
+            "version": 2 if plan.kind == "fullstack" else 1,
             "project_name": args.project_name,
             "entry": "index.html",
+            "kind": plan.kind,
+            "preset": plan.preset,
+            "database": plan.database,
+            "entrypoint": plan.entrypoint,
+            "healthcheck": plan.healthcheck,
             "spa": True,
             "needs_ai_gateway": True,
             "source": "cytopia-deploy-skill",

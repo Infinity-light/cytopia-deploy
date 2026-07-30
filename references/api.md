@@ -27,9 +27,25 @@ The device code expires in ten minutes, is bound to the logged-in camp enrollmen
   }
   ```
 
-- `artifact`: ZIP with `index.html` at the root.
+  Full-stack example:
 
-Only static Web file types are accepted. Hidden files, path traversal, symlinks, private keys, suspected provider keys, oversized archives, and unsupported extensions fail publication.
+  ```json
+  {
+    "version": 2,
+    "project_name": "校园助手",
+    "kind": "fullstack",
+    "preset": "flask",
+    "database": "mysql",
+    "entrypoint": "app:app",
+    "healthcheck": "/health",
+    "needs_ai_gateway": true,
+    "source": "cytopia-deploy-skill"
+  }
+  ```
+
+- `artifact`: static ZIP with `index.html` at the root, or sanitized source ZIP for a supported full-stack preset.
+
+Full-stack presets are `fastapi`, `flask`, and `node`; databases are `postgresql`, `mysql`, `sqlite`, and `none`. Dockerfiles and Compose files are not uploaded. Hidden files, path traversal, symlinks, keys, oversized archives, and unsupported extensions fail publication.
 
 ## Status
 
