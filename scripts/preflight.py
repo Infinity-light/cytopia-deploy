@@ -176,6 +176,14 @@ def detect_database(text: str) -> str:
     return "none"
 
 
+def detect_project_database(project_dir: Path, dependency_text: str) -> str:
+    chunks = [dependency_text]
+    for path, _relative in _iter_text_files(project_dir):
+        if path.suffix.lower() in {".py", ".js", ".jsx", ".ts", ".tsx", ".prisma"}:
+            chunks.append(path.read_text(encoding="utf-8", errors="ignore"))
+    return detect_database("\n".join(chunks))
+
+
 def normalize_healthcheck(value: str) -> str:
     normalized = "/" + value.strip().lstrip("/")
     if "\\" in normalized or ".." in normalized or "?" in normalized or "#" in normalized:
@@ -361,7 +369,7 @@ def detect_plan(project_dir: Path) -> DeployPlan:
             return DeployPlan(
                 "fullstack",
                 "fastapi",
-                detect_database(packages),
+                detect_project_database(project_dir, packages),
                 _python_entrypoint(project_dir, "fastapi"),
                 detect_healthcheck(project_dir),
                 classification_reasons=("requirements.txt contains FastAPI",),
@@ -370,7 +378,7 @@ def detect_plan(project_dir: Path) -> DeployPlan:
             return DeployPlan(
                 "fullstack",
                 "flask",
-                detect_database(packages),
+                detect_project_database(project_dir, packages),
                 _python_entrypoint(project_dir, "flask"),
                 detect_healthcheck(project_dir),
                 classification_reasons=("requirements.txt contains Flask",),
@@ -406,7 +414,7 @@ def detect_plan(project_dir: Path) -> DeployPlan:
             return DeployPlan(
                 "fullstack",
                 "node",
-                detect_database(" ".join(dependencies)),
+                detect_project_database(project_dir, " ".join(dependencies)),
                 "package.json",
                 detect_healthcheck(project_dir),
                 classification_reasons=(

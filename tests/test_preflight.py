@@ -68,6 +68,20 @@ def test_python_fullstack_detection(tmp_path: Path, requirement: str, source: st
     assert {item.relative.as_posix() for item in files} == {"requirements.txt", "app.py"}
 
 
+def test_python_stdlib_sqlite_is_detected_from_source(tmp_path: Path):
+    (tmp_path / "requirements.txt").write_text("Flask==3.1.2\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text(
+        "import sqlite3\nfrom flask import Flask\napp = Flask(__name__)\n",
+        encoding="utf-8",
+    )
+
+    plan = detect_plan(tmp_path)
+
+    assert plan.kind == "fullstack"
+    assert plan.preset == "flask"
+    assert plan.database == "sqlite"
+
+
 def test_node_mysql_detection_and_infrastructure_files_are_excluded(tmp_path: Path):
     (tmp_path / "package.json").write_text(
         '{"scripts":{"start":"node server.js"},"dependencies":{"express":"5","mysql2":"3"}}',
