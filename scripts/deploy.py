@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import gzip
+import hashlib
 import json
 import mimetypes
 import os
@@ -10,11 +12,14 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 import webbrowser
 import zipfile
+import zlib
 from dataclasses import replace
+from html.parser import HTMLParser
 from pathlib import Path
 
 from preflight import (
@@ -23,11 +28,13 @@ from preflight import (
     collect_static_files,
     detect_plan,
     normalize_healthcheck,
+    require_semantic_preflight,
     scan_for_local_secret_files,
 )
 
 DEFAULT_API_BASE = os.getenv("CYTOPIA_DEPLOY_API", "https://summercamp.godpenai.com").rstrip("/")
 TERMINAL_STATUSES = {"published", "failed"}
+CLIENT_VERSION = "2.0.0"
 
 
 def request_json(
@@ -61,6 +68,155 @@ def api_data(status: int, payload: dict) -> dict:
         error = payload.get("error") or {}
         raise RuntimeError(error.get("message") or error.get("code") or f"HTTP {status}")
     return payload.get("data", payload)
+
+
+def guard_static_downgrade(
+    detected: DeployPlan,
+    *,
+    requested_static: bool,
+    allow_static_export: bool,
+    reason: str | None,
+) -> str:
+    if detected.kind != "fullstack" or not requested_static:
+        return ""
+    cleaned = " ".join((reason or "").split())
+    if not allow_static_export:
+        raise ValueError(
+            "项目已识别为全栈应用，拒绝通过 --dist/--preset static 静默降级。"
+            "如项目确实支持纯静态导出，请显式添加 --allow-static-export "
+            "并提供 --static-export-reason。"
+        )
+    if len(cleaned) < 8:
+        raise ValueError("--static-export-reason 至少需要 8 个字符，说明为何不需要后端和数据库。")
+    return cleaned
+
+
+def skill_fingerprint() -> str:
+    root = Path(__file__).resolve().parents[1]
+    digest = hashlib.sha256()
+    for relative in ("SKILL.md", "scripts/preflight.py", "scripts/deploy.py"):
+        path = root / relative
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def source_git_state(project_dir: Path) -> tuple[str, bool]:
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(project_dir), "rev-parse", "HEAD"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=5,
+        )
+        if commit.returncode:
+            return "", False
+        dirty = subprocess.run(
+            ["git", "-C", str(project_dir), "status", "--porcelain"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=5,
+        )
+        return commit.stdout.strip()[:64], bool(dirty.stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        return "", False
+
+
+class _AssetParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.assets: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        values = dict(attrs)
+        if tag == "script" and values.get("src"):
+            self.assets.append(values["src"])
+        if (
+            tag == "link"
+            and values.get("href")
+            and "stylesheet" in values.get("rel", "").lower()
+        ):
+            self.assets.append(values["href"])
+
+
+def _decode_http_body(body: bytes, encoding: str) -> bytes:
+    normalized = encoding.lower().strip()
+    if normalized == "gzip":
+        return gzip.decompress(body)
+    if normalized == "deflate":
+        return zlib.decompress(body)
+    if normalized and normalized != "identity":
+        raise RuntimeError(f"线上验证不支持响应压缩格式：{encoding}")
+    return body
+
+
+def _fetch_public(url: str) -> tuple[int, dict[str, str], bytes, str]:
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "text/html,application/xhtml+xml,*/*;q=0.8",
+            "Accept-Encoding": "gzip",
+            "User-Agent": f"cytopia-deploy/{CLIENT_VERSION}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            raw = response.read(8 * 1024 * 1024 + 1)
+            if len(raw) > 8 * 1024 * 1024:
+                raise RuntimeError("线上响应超过 8 MB，无法完成安全验证")
+            headers = {key.lower(): value for key, value in response.headers.items()}
+            body = _decode_http_body(raw, headers.get("content-encoding", ""))
+            return response.status, headers, body, response.geturl()
+    except urllib.error.HTTPError as exc:
+        return exc.code, {}, exc.read(), exc.geturl()
+
+
+def verify_public_site(url: str, *, kind: str, healthcheck: str) -> dict:
+    status, headers, body, final_url = _fetch_public(url)
+    if not 200 <= status < 400:
+        raise RuntimeError(f"线上首页验证失败：HTTP {status}")
+    if len(body.strip()) < 16:
+        raise RuntimeError("线上首页验证失败：响应为空或过短")
+
+    checked_assets: list[str] = []
+    content_type = headers.get("content-type", "")
+    if "html" in content_type.lower() or b"<html" in body[:2048].lower():
+        parser = _AssetParser()
+        parser.feed(body.decode("utf-8", errors="replace"))
+        page_origin = urllib.parse.urlsplit(final_url)
+        for asset in parser.assets:
+            asset_url = urllib.parse.urljoin(final_url, asset)
+            parsed = urllib.parse.urlsplit(asset_url)
+            if parsed.netloc != page_origin.netloc:
+                continue
+            asset_status, _, asset_body, _ = _fetch_public(asset_url)
+            if not 200 <= asset_status < 400 or not asset_body:
+                raise RuntimeError(
+                    f"线上静态资源验证失败：{asset_url} (HTTP {asset_status})"
+                )
+            checked_assets.append(asset_url)
+            if len(checked_assets) >= 6:
+                break
+
+    probe_url = (
+        urllib.parse.urljoin(final_url, "__cytopia_verify__/")
+        if kind == "static"
+        else urllib.parse.urljoin(final_url, healthcheck.lstrip("/"))
+    )
+    probe_status, _, probe_body, _ = _fetch_public(probe_url)
+    if not 200 <= probe_status < 400 or not probe_body:
+        label = "SPA 深链接" if kind == "static" else "健康端点"
+        raise RuntimeError(f"线上{label}验证失败：HTTP {probe_status}")
+    return {
+        "home_status": status,
+        "probe_url": probe_url,
+        "probe_status": probe_status,
+        "assets_checked": len(checked_assets),
+    }
 
 
 def package_manager(project_dir: Path) -> str:
@@ -223,6 +379,15 @@ def main() -> int:
     parser.add_argument("--database", choices=("auto", "none", "sqlite", "postgresql", "mysql"), default="auto")
     parser.add_argument("--entrypoint")
     parser.add_argument("--healthcheck")
+    parser.add_argument(
+        "--allow-static-export",
+        action="store_true",
+        help="显式允许将检测为全栈的项目部署为静态导出",
+    )
+    parser.add_argument(
+        "--static-export-reason",
+        help="说明静态导出为何不依赖后端和数据库",
+    )
     parser.add_argument("--api-base", default=DEFAULT_API_BASE)
     parser.add_argument("--no-open", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
@@ -236,8 +401,34 @@ def main() -> int:
             "项目包含禁止上传的密钥文件：" + ", ".join(secret_files)
             + "。请移除密钥并改用 /__camp/ai/chat。"
         )
-    plan = detect_plan(project_dir)
+    detected_plan = detect_plan(project_dir)
+    source_commit, source_dirty = source_git_state(project_dir)
+    static_export_reason = guard_static_downgrade(
+        detected_plan,
+        requested_static=args.preset == "static" or args.dist is not None,
+        allow_static_export=args.allow_static_export,
+        reason=args.static_export_reason,
+    )
+    override_items = []
     if args.preset:
+        override_items.append(f"preset={args.preset}")
+    if args.dist:
+        override_items.append("dist=explicit")
+    if args.build_command is not None:
+        override_items.append("build_command=custom")
+    if args.database != "auto":
+        override_items.append(f"database={args.database}")
+    if args.entrypoint:
+        override_items.append(f"entrypoint={args.entrypoint}")
+    if args.healthcheck:
+        override_items.append(f"healthcheck={normalize_healthcheck(args.healthcheck)}")
+    if static_export_reason:
+        override_items.append("static_export=approved")
+    override_summary = "; ".join(override_items)
+    plan = detected_plan
+    classification_overridden = False
+    if args.preset:
+        classification_overridden = args.preset != detected_plan.preset
         plan = DeployPlan(
             kind="static" if args.preset == "static" else "fullstack",
             preset=args.preset,
@@ -246,6 +437,7 @@ def main() -> int:
             healthcheck=args.healthcheck or plan.healthcheck,
             build_command=plan.build_command if args.preset == "static" else None,
             output_dir=plan.output_dir if args.preset == "static" else None,
+            classification_reasons=detected_plan.classification_reasons,
         )
     if args.database != "auto":
         plan = replace(plan, database=args.database)
@@ -256,6 +448,7 @@ def main() -> int:
     else:
         plan = replace(plan, healthcheck=normalize_healthcheck(plan.healthcheck))
     if args.dist:
+        classification_overridden = classification_overridden or detected_plan.kind != "static"
         output_dir = args.dist if args.dist.is_absolute() else project_dir / args.dist
         build_command = args.build_command
         plan = replace(plan, kind="static", preset="static", database="none", output_dir=output_dir)
@@ -263,6 +456,7 @@ def main() -> int:
         output_dir = plan.output_dir or project_dir
         build_command = args.build_command if args.build_command is not None else plan.build_command
     run_build(build_command, project_dir)
+    require_semantic_preflight(project_dir, plan, output_dir=output_dir)
     files = collect_static_files(output_dir) if plan.kind == "static" else collect_files(project_dir, kind="fullstack")
     total_bytes = sum(item.size for item in files)
     print(
@@ -285,6 +479,14 @@ def main() -> int:
                 "preset": plan.preset,
                 "database": plan.database,
                 "entrypoint": plan.entrypoint,
+                "client_version": CLIENT_VERSION,
+                "skill_fingerprint": skill_fingerprint(),
+                "classification_reason": "; ".join(detected_plan.classification_reasons),
+                "classification_overridden": classification_overridden,
+                "static_export_reason": static_export_reason,
+                "override_summary": override_summary,
+                "source_commit": source_commit,
+                "source_dirty": source_dirty,
             }
             print(json.dumps(result, ensure_ascii=False) if args.json else "本地预检完成，未上传。")
             return 0
@@ -301,6 +503,14 @@ def main() -> int:
             "spa": True,
             "needs_ai_gateway": True,
             "source": "cytopia-deploy-skill",
+            "client_version": CLIENT_VERSION,
+            "skill_fingerprint": skill_fingerprint(),
+            "classification_reason": "; ".join(detected_plan.classification_reasons),
+            "classification_overridden": classification_overridden,
+            "static_export_reason": static_export_reason,
+            "override_summary": override_summary,
+            "source_commit": source_commit,
+            "source_dirty": source_dirty,
         }
         queued = upload_archive(args.api_base.rstrip("/"), device_code, manifest, archive)
         print(f"[queued] deployment_id={queued['deployment_id']}", flush=True)
@@ -311,12 +521,26 @@ def main() -> int:
         )
     if job["status"] != "published":
         raise RuntimeError(job.get("error") or "部署失败")
+    http_verification = verify_public_site(
+        job["url"],
+        kind=plan.kind,
+        healthcheck=plan.healthcheck,
+    )
+    print(
+        "[verify] PASS "
+        f"home={http_verification['home_status']} "
+        f"probe={http_verification['probe_status']} "
+        f"assets={http_verification['assets_checked']}",
+        flush=True,
+    )
     result = {
         "status": "published",
         "url": job["url"],
         "fallback_url": job["fallback_url"],
         "hostname": job["hostname"],
         "deployment_id": job["deployment_id"],
+        "http_verification": http_verification,
+        "browser_verification_required": True,
     }
     if args.json:
         print(json.dumps(result, ensure_ascii=False))

@@ -13,6 +13,8 @@ Publish a student project through the training-camp deployment control plane. Ke
 - Never add a secret to the project, this Skill, a prompt, a screenshot, or a Git commit.
 - Upload static output for frontend-only projects or sanitized source for supported full-stack projects. Do not upload `.env`, credentials, local databases, Dockerfiles, Compose files, private keys, dependency directories, or caches.
 - Full-stack code runs only through the platform presets `fastapi`, `flask`, and `node`; never request arbitrary container privileges.
+- Never turn a detected full-stack project into a static deployment merely because `dist/`, `build/`, or `out/` exists. `--dist` and `--preset static` are not classification shortcuts.
+- A deliberate full-stack-to-static export requires both `--allow-static-export` and a concrete `--static-export-reason`. Confirm first that the export contains no API route, server dependency, database access, client-side password, unresolved public secret, or localhost URL.
 - Treat the browser device code as a one-time authorization. Keep it in process memory only and let it expire after use.
 - Stop if preflight reports a suspected secret. Help the learner remove the secret or replace the integration with `/__camp/ai/chat`.
 
@@ -35,6 +37,8 @@ The learner experience is **one prompt, one browser confirmation, one live URL**
    - FastAPI or Flask: upload sanitized Python source and `requirements.txt`.
    - Node.js: upload sanitized source when `package.json` has a supported server framework and `start`.
    - Detect PostgreSQL, MySQL, or SQLite; inspect code and pass `--database` if ambiguous.
+   - Preserve the detector evidence. Every upload records the client version, Skill fingerprint, classification reason, override status/reason, and source Git commit/dirty state.
+   - Treat semantic-preflight failures as blockers. In particular, do not ship client-visible passwords or secrets, unresolved `process.env`/`import.meta.env`, loopback URLs, or API/database code in a static artifact.
 2. Run the deterministic deploy client:
 
    ```powershell
@@ -45,11 +49,16 @@ The learner experience is **one prompt, one browser confirmation, one live URL**
 3. Show the learner the device code and browser URL printed by the script. Explain that the browser authorization grants one upload for the current team and reveals no infrastructure secret.
 4. Continue waiting while the script uploads and polls. Do not ask the learner to copy a token back into chat.
 5. On success, return the complete live URL and verify:
-   - the home page loads;
+   - let the client complete its automatic HTTP verification of the home page, same-origin JavaScript/CSS assets, and SPA deep link or full-stack health endpoint;
+   - open the public URL with the Browser tool and verify that meaningful DOM content renders rather than a blank screen or permanent loading state;
+   - inspect browser console errors and failed network requests;
+   - verify both desktop and mobile viewports;
    - a deep link falls back to `index.html` for SPA projects;
    - the configured health endpoint succeeds for full-stack projects;
    - database-backed create/read behavior survives one redeploy;
    - `GET /__camp/ai/health` reports the project and AI availability when the app needs AI.
+   - The platform Runner must observe 60 continuous seconds of successful health checks with no container restart before switching traffic. A first successful response is not enough.
+   - Do not report deployment success until both automatic HTTP checks and Browser verification pass. `browser_verification_required: true` in client output is an instruction to the agent, not a learner task.
 6. On failure, read the reported stage and use [references/troubleshooting.md](references/troubleshooting.md). Fix the project, then request a new device code and redeploy.
 
 Treat steps 1–6 as internal Skill execution. Summarize them after completion; never assign them to the learner as homework.

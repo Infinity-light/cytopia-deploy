@@ -62,6 +62,14 @@ class DeployPlan:
     healthcheck: str
     build_command: str | None = None
     output_dir: Path | None = None
+    classification_reasons: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class SemanticFinding:
+    code: str
+    path: str
+    message: str
 
 
 StaticFile = DeployFile
@@ -184,6 +192,153 @@ def detect_healthcheck(project_dir: Path) -> str:
     return "/"
 
 
+def _next_static_export(project_dir: Path) -> bool:
+    for name in (
+        "next.config.js",
+        "next.config.mjs",
+        "next.config.cjs",
+        "next.config.ts",
+    ):
+        path = project_dir / name
+        if path.is_file() and re.search(
+            r"""\boutput\s*:\s*["']export["']""",
+            path.read_text(encoding="utf-8", errors="ignore"),
+        ):
+            return True
+    return False
+
+
+def _iter_text_files(root: Path):
+    if not root.is_dir():
+        return
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if any(part in IGNORED_DIRS for part in relative.parts):
+            continue
+        if (
+            path.is_file()
+            and path.suffix.lower() in SOURCE_SUFFIXES
+            and path.stat().st_size <= 2 * 1024 * 1024
+        ):
+            yield path, relative
+
+
+def scan_semantic_risks(
+    project_dir: Path,
+    plan: DeployPlan,
+    *,
+    output_dir: Path | None = None,
+) -> list[SemanticFinding]:
+    """Find deploy-time mistakes that syntax and secret scans cannot detect."""
+    findings: list[SemanticFinding] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(code: str, path: Path | str, message: str) -> None:
+        key = (code, str(path))
+        if key not in seen:
+            findings.append(SemanticFinding(code, str(path), message))
+            seen.add(key)
+
+    public_secret = re.compile(
+        r"\b(?:NEXT_PUBLIC|VITE|PUBLIC)_[A-Z0-9_]*(?:PASSWORD|PASSWD|SECRET|TOKEN|API_KEY|PRIVATE_KEY)\b",
+        re.IGNORECASE,
+    )
+    client_password_gate = re.compile(
+        r"""(?is)
+        (?:password|passwd|密码).{0,160}(?:===|==).{0,80}["'][^"'{}\r\n]{4,64}["']
+        |
+        ["'][^"'{}\r\n]{4,64}["'].{0,80}(?:===|==).{0,160}(?:password|passwd|密码)
+        """,
+        re.VERBOSE,
+    )
+    for path, relative in _iter_text_files(project_dir):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if public_secret.search(text):
+            add(
+                "public_secret",
+                relative,
+                "公开客户端环境变量中包含密码、令牌或密钥；它会被打进浏览器代码。",
+            )
+        if (
+            path.suffix.lower() in {".js", ".jsx", ".ts", ".tsx", ".vue"}
+            and client_password_gate.search(text)
+        ):
+            add(
+                "client_password_gate",
+                relative,
+                "检测到浏览器端硬编码密码比较；请改用服务端鉴权。",
+            )
+
+    if plan.kind != "static":
+        return findings
+
+    for api_dir in ("api", "app/api", "pages/api", "src/app/api", "src/pages/api"):
+        if (project_dir / api_dir).is_dir():
+            add(
+                "static_api_mismatch",
+                api_dir,
+                "静态部署不能运行 API 路由；项目应按全栈方式部署。",
+            )
+
+    package_json = project_dir / "package.json"
+    if package_json.is_file():
+        package = json.loads(package_json.read_text(encoding="utf-8"))
+        dependencies = {
+            **package.get("dependencies", {}),
+            **package.get("devDependencies", {}),
+        }
+        server_dependencies = {
+            "express", "fastify", "koa", "@nestjs/core", "hono",
+            "prisma", "@prisma/client", "sequelize", "typeorm",
+            "mysql", "mysql2", "pg", "better-sqlite3",
+        }
+        detected = sorted(server_dependencies.intersection(dependencies))
+        if detected:
+            add(
+                "static_runtime_mismatch",
+                "package.json",
+                "静态部署检测到服务端或数据库依赖：" + ", ".join(detected),
+            )
+
+    built_root = (output_dir or plan.output_dir or project_dir).resolve()
+    unresolved_env = re.compile(
+        r"\b(?:process\.env|import\.meta\.env)\.[A-Za-z_][A-Za-z0-9_]*"
+    )
+    loopback = re.compile(
+        r"(?i)(?:https?://)?(?:localhost|127\.0\.0\.1)(?::\d+)?"
+    )
+    for path, relative in _iter_text_files(built_root):
+        text = path.read_text(encoding="utf-8", errors="ignore")
+        if unresolved_env.search(text):
+            add(
+                "unresolved_client_env",
+                relative,
+                "静态产物仍包含未解析的运行时环境变量。",
+            )
+        if loopback.search(text):
+            add(
+                "loopback_url",
+                relative,
+                "静态产物引用 localhost/127.0.0.1，线上浏览器无法访问本机服务。",
+            )
+    return findings
+
+
+def require_semantic_preflight(
+    project_dir: Path,
+    plan: DeployPlan,
+    *,
+    output_dir: Path | None = None,
+) -> None:
+    findings = scan_semantic_risks(project_dir, plan, output_dir=output_dir)
+    if findings:
+        detail = "; ".join(
+            f"{finding.code} ({finding.path}): {finding.message}"
+            for finding in findings
+        )
+        raise ValueError(f"语义预检失败：{detail}")
+
+
 def _python_entrypoint(project_dir: Path, framework: str) -> str:
     marker = "FastAPI(" if framework == "fastapi" else "Flask("
     for path in sorted(project_dir.glob("*.py")):
@@ -203,26 +358,85 @@ def detect_plan(project_dir: Path) -> DeployPlan:
     if requirements.is_file():
         packages = requirements.read_text(encoding="utf-8", errors="ignore").lower()
         if "fastapi" in packages:
-            return DeployPlan("fullstack", "fastapi", detect_database(packages), _python_entrypoint(project_dir, "fastapi"), detect_healthcheck(project_dir))
+            return DeployPlan(
+                "fullstack",
+                "fastapi",
+                detect_database(packages),
+                _python_entrypoint(project_dir, "fastapi"),
+                detect_healthcheck(project_dir),
+                classification_reasons=("requirements.txt contains FastAPI",),
+            )
         if "flask" in packages:
-            return DeployPlan("fullstack", "flask", detect_database(packages), _python_entrypoint(project_dir, "flask"), detect_healthcheck(project_dir))
+            return DeployPlan(
+                "fullstack",
+                "flask",
+                detect_database(packages),
+                _python_entrypoint(project_dir, "flask"),
+                detect_healthcheck(project_dir),
+                classification_reasons=("requirements.txt contains Flask",),
+            )
     package_json = project_dir / "package.json"
     if package_json.is_file():
         package = json.loads(package_json.read_text(encoding="utf-8"))
         dependencies = {**package.get("dependencies", {}), **package.get("devDependencies", {})}
         dynamic = {"express", "fastify", "koa", "next", "@nestjs/core", "hono"}
-        if dynamic.intersection(dependencies) and package.get("scripts", {}).get("start"):
+        dynamic_found = sorted(dynamic.intersection(dependencies))
+        if "next" in dependencies and _next_static_export(project_dir):
+            return DeployPlan(
+                "static",
+                "static",
+                "none",
+                "",
+                "/",
+                f"{package_manager(project_dir)} run build",
+                project_dir / "out",
+                ("next.config explicitly sets output: export",),
+            )
+        if dynamic_found and not package.get("scripts", {}).get("start"):
+            raise ValueError(
+                "检测到动态服务依赖但 package.json 缺少 start 脚本；"
+                "拒绝静默降级为静态部署：" + ", ".join(dynamic_found)
+            )
+        if dynamic_found:
             if "next" in dependencies and not any(
                 (project_dir / path).is_dir()
                 for path in ("app", "pages", "src/app", "src/pages")
             ):
                 raise ValueError("Next.js 项目缺少 app or pages 页面目录")
-            return DeployPlan("fullstack", "node", detect_database(" ".join(dependencies)), "package.json", detect_healthcheck(project_dir))
+            return DeployPlan(
+                "fullstack",
+                "node",
+                detect_database(" ".join(dependencies)),
+                "package.json",
+                detect_healthcheck(project_dir),
+                classification_reasons=(
+                    "package.json contains server runtime: " + ", ".join(dynamic_found),
+                    "package.json contains a start script",
+                ),
+            )
         if "build" not in package.get("scripts", {}):
             raise ValueError("package.json 没有 build 或可运行的 start 脚本")
-        return DeployPlan("static", "static", "none", "", "/", f"{package_manager(project_dir)} run build", project_dir / "dist")
+        return DeployPlan(
+            "static",
+            "static",
+            "none",
+            "",
+            "/",
+            f"{package_manager(project_dir)} run build",
+            project_dir / "dist",
+            ("package.json has a build script and no server runtime",),
+        )
     if (project_dir / "index.html").is_file():
-        return DeployPlan("static", "static", "none", "", "/", None, project_dir)
+        return DeployPlan(
+            "static",
+            "static",
+            "none",
+            "",
+            "/",
+            None,
+            project_dir,
+            ("project root contains index.html and no server manifest",),
+        )
     raise ValueError("无法识别项目；请用 --preset 指定 static、fastapi、flask 或 node")
 
 
@@ -236,6 +450,7 @@ def main() -> int:
         raise SystemExit("项目包含禁止上传的密钥文件：" + ", ".join(secrets_found))
     plan = detect_plan(project_dir)
     root = plan.output_dir or project_dir
+    require_semantic_preflight(project_dir, plan, output_dir=root)
     files = collect_static_files(root) if plan.kind == "static" else collect_files(root, kind="fullstack")
     print(
         f"PASS kind={plan.kind} preset={plan.preset} database={plan.database} "

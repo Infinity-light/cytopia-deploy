@@ -11,6 +11,7 @@ from preflight import (
     collect_static_files,
     detect_plan,
     normalize_healthcheck,
+    require_semantic_preflight,
     scan_for_local_secret_files,
 )
 
@@ -93,6 +94,60 @@ def test_next_detection_rejects_incomplete_source_tree(tmp_path: Path):
         detect_plan(tmp_path)
 
 
+def test_dynamic_node_project_cannot_fall_back_to_static_without_start(tmp_path: Path):
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"build":"next build"},"dependencies":{"next":"16"}}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="拒绝静默降级"):
+        detect_plan(tmp_path)
+
+
+def test_explicit_next_export_is_classified_as_static(tmp_path: Path):
+    (tmp_path / "package.json").write_text(
+        '{"scripts":{"build":"next build"},"dependencies":{"next":"16"}}',
+        encoding="utf-8",
+    )
+    (tmp_path / "next.config.mjs").write_text(
+        "export default { output: 'export' };",
+        encoding="utf-8",
+    )
+
+    plan = detect_plan(tmp_path)
+
+    assert plan.kind == "static"
+    assert plan.output_dir == tmp_path / "out"
+    assert "output: export" in plan.classification_reasons[0]
+
+
+def test_semantic_preflight_blocks_public_password_and_loopback(tmp_path: Path):
+    (tmp_path / "index.html").write_text("<h1>hello</h1>", encoding="utf-8")
+    (tmp_path / "app.js").write_text(
+        "const key = process.env.NEXT_PUBLIC_APP_PASSWORD;"
+        "fetch('http://localhost:3000/api');",
+        encoding="utf-8",
+    )
+    plan = detect_plan(tmp_path)
+
+    with pytest.raises(ValueError, match="public_secret") as exc:
+        require_semantic_preflight(tmp_path, plan, output_dir=tmp_path)
+
+    assert "loopback_url" in str(exc.value)
+    assert "unresolved_client_env" in str(exc.value)
+
+
+def test_semantic_preflight_blocks_static_api_routes(tmp_path: Path):
+    (tmp_path / "index.html").write_text("<h1>hello</h1>", encoding="utf-8")
+    api = tmp_path / "api"
+    api.mkdir()
+    (api / "hello.js").write_text("export default () => 'ok'", encoding="utf-8")
+    plan = detect_plan(tmp_path)
+
+    with pytest.raises(ValueError, match="static_api_mismatch"):
+        require_semantic_preflight(tmp_path, plan, output_dir=tmp_path)
+
+
 def test_healthcheck_normalizes_duplicate_leading_slashes():
     assert normalize_healthcheck("//api/auth/me") == "/api/auth/me"
 
@@ -112,3 +167,38 @@ def test_device_flow_recovers_once_from_missing_code(monkeypatch):
     monkeypatch.setattr(deploy.time, "sleep", lambda _seconds: None)
 
     assert deploy.authorize("https://example", open_browser=False) == "second"
+
+
+def test_fullstack_static_downgrade_requires_explicit_reason():
+    import deploy
+
+    detected = deploy.DeployPlan(
+        "fullstack",
+        "flask",
+        "sqlite",
+        "app:app",
+        "/health",
+    )
+
+    with pytest.raises(ValueError, match="拒绝"):
+        deploy.guard_static_downgrade(
+            detected,
+            requested_static=True,
+            allow_static_export=False,
+            reason=None,
+        )
+
+    reason = deploy.guard_static_downgrade(
+        detected,
+        requested_static=True,
+        allow_static_export=True,
+        reason="后端功能已移除，数据为构建时快照",
+    )
+    assert reason == "后端功能已移除，数据为构建时快照"
+
+
+def test_http_decoder_rejects_mismatched_gzip_header():
+    import deploy
+
+    with pytest.raises(OSError):
+        deploy._decode_http_body(b"already decoded", "gzip")
