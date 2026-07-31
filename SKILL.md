@@ -9,13 +9,14 @@ Publish a student project through the training-camp deployment control plane. Ke
 
 ## Safety boundary
 
-- Never request, read, copy, print, or store an SSH key, DNS AccessKey, model API key, platform admin password, or reusable deployment token.
+- Never request, read, copy, print, or store an SSH key, DNS AccessKey, model API key, or platform admin password.
 - Never add a secret to the project, this Skill, a prompt, a screenshot, or a Git commit.
 - Upload static output for frontend-only projects or sanitized source for supported full-stack projects. Do not upload `.env`, credentials, local databases, Dockerfiles, Compose files, private keys, dependency directories, or caches.
 - Full-stack code runs only through the platform presets `fastapi`, `flask`, and `node`; never request arbitrary container privileges.
 - Never turn a detected full-stack project into a static deployment merely because `dist/`, `build/`, or `out/` exists. `--dist` and `--preset static` are not classification shortcuts.
 - A deliberate full-stack-to-static export requires both `--allow-static-export` and a concrete `--static-export-reason`. Confirm first that the export contains no API route, server dependency, database access, client-side password, unresolved public secret, or localhost URL.
-- Treat the browser device code as a one-time authorization. Keep it in process memory only and let it expire after use.
+- Treat the browser device code as a one-time confirmation. Exchange it for a narrowly scoped deployment session that lasts at most eight hours.
+- Store the session only in the operating system's user-protected state (Windows DPAPI or a user-only state file). Never store it in the learner project, prompt, screenshot, log, or Git commit.
 - Stop if preflight reports a suspected secret. Help the learner remove the secret or replace the integration with `/__camp/ai/chat`.
 
 ## Learner interaction contract
@@ -25,7 +26,7 @@ The learner experience is **one prompt, one browser confirmation, one live URL**
 - Own project inspection, project-name inference, build selection, output-directory detection, preflight, packaging, device-flow startup, upload, progress polling, online verification, and ordinary failure diagnosis.
 - Do not turn those internal actions into a checklist for the learner. Do not ask the learner to write a manifest, choose `dist/` versus `build/`, run the deployment client, copy a token into chat, configure a domain, or test a technical endpoint.
 - Ask a clarifying question only when two genuinely different projects or output directories remain plausible after inspection. Otherwise make the safe choice and proceed.
-- The only expected learner action during a normal deployment is confirming their training-camp identity in the browser. The learner never gives the agent an account password or infrastructure credential.
+- The only expected learner action is confirming their training-camp identity once in the browser on the current device. Fixes, retries, and later versions reuse that authorization for up to eight hours. The learner never gives the agent an account password or infrastructure credential.
 - After publication, perform the verification yourself and return a short result: live URL, deployment ID, checks passed, and any learner-visible limitation.
 - For a later release, interpret “重新部署当前项目” as the same workflow. Reuse the stable hostname automatically.
 
@@ -46,7 +47,7 @@ The learner experience is **one prompt, one browser confirmation, one live URL**
    ```
 
    Pass `--preset`, `--database`, `--entrypoint`, or `--healthcheck` when detection is ambiguous. Pass `--dry-run --json` to inspect the deployment plan without uploading.
-3. Show the learner the device code and browser URL printed by the script. Explain that the browser authorization grants one upload for the current team and reveals no infrastructure secret.
+3. Let the client reuse the current device's valid deployment session. Only when no valid session exists, show the learner the device code and browser URL printed by the script. Explain that this grants the current device permission to deploy only the current team project for at most eight hours and reveals no infrastructure secret.
 4. Continue waiting while the script uploads and polls. Do not ask the learner to copy a token back into chat.
 5. On success, return the complete live URL and verify:
    - let the client complete its automatic HTTP verification of the home page, same-origin JavaScript/CSS assets, and SPA deep link or full-stack health endpoint;
@@ -59,7 +60,7 @@ The learner experience is **one prompt, one browser confirmation, one live URL**
    - `GET /__camp/ai/health` reports the project and AI availability when the app needs AI.
    - The platform Runner must observe 60 continuous seconds of successful health checks with no container restart before switching traffic. A first successful response is not enough.
    - Do not report deployment success until both automatic HTTP checks and Browser verification pass. `browser_verification_required: true` in client output is an instruction to the agent, not a learner task.
-6. On failure, read the reported stage and use [references/troubleshooting.md](references/troubleshooting.md). Fix the project, then request a new device code and redeploy.
+6. On failure, read the reported stage and use [references/troubleshooting.md](references/troubleshooting.md). Fix the project and rerun the same deploy command. Reuse the existing session; never ask for another confirmation while it remains valid. Identical uploads are idempotent and return the existing deployment instead of creating duplicate work.
 
 Treat steps 1–6 as internal Skill execution. Summarize them after completion; never assign them to the learner as homework.
 

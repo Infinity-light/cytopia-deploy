@@ -19,6 +19,7 @@ import webbrowser
 import zipfile
 import zlib
 from dataclasses import replace
+from datetime import datetime, timezone
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -34,7 +35,7 @@ from preflight import (
 
 DEFAULT_API_BASE = os.getenv("CYTOPIA_DEPLOY_API", "https://summercamp.godpenai.com").rstrip("/")
 TERMINAL_STATUSES = {"published", "failed"}
-CLIENT_VERSION = "2.0.0"
+CLIENT_VERSION = "2.1.0"
 
 
 def request_json(
@@ -68,6 +69,116 @@ def api_data(status: int, payload: dict) -> dict:
         error = payload.get("error") or {}
         raise RuntimeError(error.get("message") or error.get("code") or f"HTTP {status}")
     return payload.get("data", payload)
+
+
+def session_state_path() -> Path:
+    override = os.getenv("CYTOPIA_DEPLOY_STATE_DIR")
+    if override:
+        root = Path(override)
+    elif os.name == "nt" and os.getenv("LOCALAPPDATA"):
+        root = Path(os.environ["LOCALAPPDATA"]) / "Cytopia"
+    else:
+        root = Path(os.getenv("XDG_STATE_HOME", Path.home() / ".local" / "state")) / "cytopia"
+    return root / "deploy-session.json"
+
+
+def _powershell_secret(value: str, *, protect: bool) -> str:
+    if protect:
+        script = (
+            "$v=[Console]::In.ReadToEnd();"
+            "$s=ConvertTo-SecureString $v -AsPlainText -Force;"
+            "ConvertFrom-SecureString $s"
+        )
+    else:
+        script = (
+            "$v=[Console]::In.ReadToEnd();"
+            "$s=ConvertTo-SecureString $v;"
+            "$p=[Runtime.InteropServices.Marshal]::SecureStringToBSTR($s);"
+            "try{[Runtime.InteropServices.Marshal]::PtrToStringBSTR($p)}"
+            "finally{[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($p)}"
+        )
+    result = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        input=value,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    if result.returncode or not result.stdout.strip():
+        raise RuntimeError("无法使用 Windows 凭据保护部署会话")
+    return result.stdout.strip()
+
+
+def load_session_state() -> dict:
+    path = session_state_path()
+    if not path.is_file():
+        return {"client_id": uuid.uuid4().hex}
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"client_id": uuid.uuid4().hex}
+    if not state.get("client_id"):
+        state["client_id"] = uuid.uuid4().hex
+    if state.get("protected_token") and os.name == "nt":
+        try:
+            state["access_token"] = _powershell_secret(
+                state["protected_token"],
+                protect=False,
+            )
+        except (OSError, RuntimeError, subprocess.SubprocessError):
+            state.pop("access_token", None)
+    return state
+
+
+def save_session_state(state: dict) -> None:
+    path = session_state_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "client_id": state["client_id"],
+        "api_base": state.get("api_base", ""),
+        "expires_at": state.get("expires_at", ""),
+    }
+    token = state.get("access_token", "")
+    if token:
+        if os.name == "nt":
+            payload["protected_token"] = _powershell_secret(token, protect=True)
+        else:
+            payload["access_token"] = token
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    if os.name != "nt":
+        temporary.chmod(0o600)
+    temporary.replace(path)
+    if os.name != "nt":
+        path.chmod(0o600)
+
+
+def _locally_expired(expires_at: str) -> bool:
+    if not expires_at:
+        return False
+    try:
+        return datetime.now(timezone.utc) >= datetime.fromisoformat(expires_at)
+    except ValueError:
+        return True
+
+
+def reusable_session(api_base: str, state: dict) -> str | None:
+    token = state.get("access_token")
+    if not token or state.get("api_base") != api_base or _locally_expired(state.get("expires_at", "")):
+        return None
+    status, response = request_json(
+        "GET",
+        f"{api_base}/api/deploy/session",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    if status in {401, 403, 404, 410}:
+        return None
+    session = api_data(status, response)
+    state["expires_at"] = session.get("expires_at", state.get("expires_at", ""))
+    save_session_state(state)
+    print("[auth] 复用今天已有的部署授权，无需再次确认。", flush=True)
+    return token
 
 
 def guard_static_downgrade(
@@ -317,8 +428,12 @@ def upload_archive(api_base: str, device_code: str, manifest: dict, archive: Pat
         return api_data(exc.code, payload)
 
 
-def authorize(api_base: str, *, open_browser: bool, recovery_attempts: int = 1) -> str:
-    status, response = request_json("POST", f"{api_base}/api/deploy/device/start")
+def authorize(api_base: str, *, open_browser: bool, client_id: str) -> dict:
+    status, response = request_json(
+        "POST",
+        f"{api_base}/api/deploy/device/start",
+        payload={"client_id": client_id},
+    )
     device = api_data(status, response)
     print(f"\n设备码：{device['user_code']}", flush=True)
     print(f"授权地址：{device['verification_uri']}", flush=True)
@@ -335,29 +450,48 @@ def authorize(api_base: str, *, open_browser: bool, recovery_attempts: int = 1) 
             payload={"device_code": device["device_code"]},
         )
         if poll_status in {404, 410}:
-            if recovery_attempts > 0:
-                print("[auth] 设备码已失效，正在自动申请新的授权码。", flush=True)
-                return authorize(
-                    api_base,
-                    open_browser=open_browser,
-                    recovery_attempts=recovery_attempts - 1,
-                )
-            raise RuntimeError("设备码不存在或已过期，请重新部署")
+            raise RuntimeError(
+                "本次设备码不存在或已过期，部署已停止；重新运行命令后只需确认一次"
+            )
         polled = api_data(poll_status, poll_response)
         if polled["authorized"]:
             print("[auth] 已授权，开始上传。", flush=True)
-            return device["device_code"]
+            return {
+                "access_token": polled.get("access_token", device["device_code"]),
+                "expires_at": polled.get("session_expires_at", ""),
+            }
     raise RuntimeError("等待浏览器授权超时")
 
 
-def wait_for_deployment(api_base: str, device_code: str, deployment_id: str) -> dict:
+def resolve_deploy_session(api_base: str, *, open_browser: bool) -> str:
+    state = load_session_state()
+    token = reusable_session(api_base, state)
+    if token:
+        return token
+    authorized = authorize(
+        api_base,
+        open_browser=open_browser,
+        client_id=state["client_id"],
+    )
+    state.update(
+        {
+            "api_base": api_base,
+            "access_token": authorized["access_token"],
+            "expires_at": authorized.get("expires_at", ""),
+        }
+    )
+    save_session_state(state)
+    return authorized["access_token"]
+
+
+def wait_for_deployment(api_base: str, access_token: str, deployment_id: str) -> dict:
     seen = 0
     deadline = time.monotonic() + 10 * 60
     while time.monotonic() < deadline:
         status, response = request_json(
             "GET",
             f"{api_base}/api/deploy/jobs/{deployment_id}",
-            headers={"Authorization": f"Bearer {device_code}"},
+            headers={"Authorization": f"Bearer {access_token}"},
         )
         job = api_data(status, response)
         for event in job.get("events", [])[seen:]:
@@ -490,7 +624,10 @@ def main() -> int:
             }
             print(json.dumps(result, ensure_ascii=False) if args.json else "本地预检完成，未上传。")
             return 0
-        device_code = authorize(args.api_base.rstrip("/"), open_browser=not args.no_open)
+        access_token = resolve_deploy_session(
+            args.api_base.rstrip("/"),
+            open_browser=not args.no_open,
+        )
         manifest = {
             "version": 2 if plan.kind == "fullstack" else 1,
             "project_name": args.project_name,
@@ -512,11 +649,11 @@ def main() -> int:
             "source_commit": source_commit,
             "source_dirty": source_dirty,
         }
-        queued = upload_archive(args.api_base.rstrip("/"), device_code, manifest, archive)
+        queued = upload_archive(args.api_base.rstrip("/"), access_token, manifest, archive)
         print(f"[queued] deployment_id={queued['deployment_id']}", flush=True)
         job = wait_for_deployment(
             args.api_base.rstrip("/"),
-            device_code,
+            access_token,
             queued["deployment_id"],
         )
     if job["status"] != "published":

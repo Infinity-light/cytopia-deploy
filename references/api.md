@@ -4,12 +4,16 @@ Base URL: `https://summercamp.godpenai.com`
 
 ## Device authorization
 
-1. `POST /api/deploy/device/start`
+1. `POST /api/deploy/device/start` with a stable, random `client_id`.
 2. Open the returned `verification_uri`.
 3. Poll `POST /api/deploy/device/token` with `{"device_code":"..."}`.
-4. Use the same raw device code as `Authorization: Bearer ...` for one artifact upload.
+4. Save the returned `access_token` in operating-system-protected user state.
+5. Validate a cached session with `GET /api/deploy/session`.
+6. Use the access token as `Authorization: Bearer ...` for uploads and job polling.
 
-The device code expires in ten minutes, is bound to the logged-in camp enrollment, and becomes consumed after upload. It cannot access infrastructure APIs.
+The device code expires in ten minutes and is consumed after authorization. The deployment session is bound to the logged-in camp enrollment, the current team, and the first uploaded project; it lasts at most eight hours. It cannot access infrastructure APIs.
+
+The client reuses a valid session for fixes, retries, and new versions. It must not silently generate a second device code when the current code expires; stop with a clear error so one command execution never causes repeated confirmations.
 
 ## Artifact upload
 
@@ -47,9 +51,11 @@ The device code expires in ten minutes, is bound to the logged-in camp enrollmen
 
 Full-stack presets are `fastapi`, `flask`, and `node`; databases are `postgresql`, `mysql`, `sqlite`, and `none`. Dockerfiles and Compose files are not uploaded. Hidden files, path traversal, symlinks, keys, oversized archives, and unsupported extensions fail publication.
 
+Uploads are idempotent by artifact checksum plus normalized manifest. Repeating an identical upload returns the original `deployment_id` with `deduplicated: true`.
+
 ## Status
 
-`GET /api/deploy/jobs/{deployment_id}` accepts the consumed device code until it expires. Terminal states are `published` and `failed`.
+`GET /api/deploy/jobs/{deployment_id}` accepts the scoped deployment session. Terminal states are `published` and `failed`.
 
 ## AI gateway
 

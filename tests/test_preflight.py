@@ -166,21 +166,99 @@ def test_healthcheck_normalizes_duplicate_leading_slashes():
     assert normalize_healthcheck("//api/auth/me") == "/api/auth/me"
 
 
-def test_device_flow_recovers_once_from_missing_code(monkeypatch):
+def test_device_flow_uses_one_code_and_returns_session(monkeypatch):
     import deploy
 
     responses = iter(
         [
             (201, {"ok": True, "data": {"device_code": "first", "user_code": "AAAA-BBBB", "verification_uri": "https://example/first", "expires_in": 60, "interval": 2}}),
-            (404, {"ok": False, "error": {"message": "设备码不存在"}}),
-            (201, {"ok": True, "data": {"device_code": "second", "user_code": "CCCC-DDDD", "verification_uri": "https://example/second", "expires_in": 60, "interval": 2}}),
-            (200, {"ok": True, "data": {"authorized": True}}),
+            (200, {"ok": True, "data": {"authorized": True, "access_token": "session-token", "session_expires_at": "2026-08-01T00:00:00+00:00"}}),
         ]
     )
-    monkeypatch.setattr(deploy, "request_json", lambda *_args, **_kwargs: next(responses))
+    requests = []
+
+    def fake_request(method, url, **kwargs):
+        requests.append((method, url, kwargs))
+        return next(responses)
+
+    monkeypatch.setattr(deploy, "request_json", fake_request)
     monkeypatch.setattr(deploy.time, "sleep", lambda _seconds: None)
 
-    assert deploy.authorize("https://example", open_browser=False) == "second"
+    assert deploy.authorize(
+        "https://example",
+        open_browser=False,
+        client_id="stable-client",
+    ) == {
+        "access_token": "session-token",
+        "expires_at": "2026-08-01T00:00:00+00:00",
+    }
+    assert requests[0][2]["payload"] == {"client_id": "stable-client"}
+    assert sum(url.endswith("/device/start") for _, url, _ in requests) == 1
+
+
+def test_device_flow_does_not_generate_another_code_after_expiry(monkeypatch):
+    import deploy
+
+    responses = iter(
+        [
+            (201, {"ok": True, "data": {"device_code": "first", "user_code": "AAAA-BBBB", "verification_uri": "https://example/first", "expires_in": 60, "interval": 2}}),
+            (410, {"ok": False, "error": {"message": "设备码不存在"}}),
+        ]
+    )
+    requests = []
+
+    def fake_request(method, url, **kwargs):
+        requests.append((method, url, kwargs))
+        return next(responses)
+
+    monkeypatch.setattr(deploy, "request_json", fake_request)
+    monkeypatch.setattr(deploy.time, "sleep", lambda _seconds: None)
+
+    with pytest.raises(RuntimeError, match="部署已停止"):
+        deploy.authorize(
+            "https://example",
+            open_browser=False,
+            client_id="stable-client",
+        )
+
+    assert sum(url.endswith("/device/start") for _, url, _ in requests) == 1
+
+
+def test_resolve_deploy_session_reuses_cached_token_without_browser(monkeypatch):
+    import deploy
+
+    state = {
+        "client_id": "stable-client",
+        "api_base": "https://example",
+        "access_token": "cached-token",
+        "expires_at": "2099-01-01T00:00:00+00:00",
+    }
+    monkeypatch.setattr(deploy, "load_session_state", lambda: state)
+    monkeypatch.setattr(deploy, "save_session_state", lambda _state: None)
+    monkeypatch.setattr(
+        deploy,
+        "request_json",
+        lambda *_args, **_kwargs: (
+            200,
+            {
+                "ok": True,
+                "data": {
+                    "authorized": True,
+                    "expires_at": "2099-01-01T00:00:00+00:00",
+                },
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        deploy,
+        "authorize",
+        lambda *_args, **_kwargs: pytest.fail("不应重新发起浏览器授权"),
+    )
+
+    assert deploy.resolve_deploy_session(
+        "https://example",
+        open_browser=False,
+    ) == "cached-token"
 
 
 def test_fullstack_static_downgrade_requires_explicit_reason():
