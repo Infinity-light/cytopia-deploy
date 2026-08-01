@@ -23,7 +23,11 @@ The client reuses a valid session for fixes, retries, and new versions. It must 
 
   ```json
   {
+    "version": 1,
     "project_name": "校园助手",
+    "kind": "static",
+    "preset": "static",
+    "database": "none",
     "entry": "index.html",
     "spa": true,
     "needs_ai_gateway": true,
@@ -31,25 +35,9 @@ The client reuses a valid session for fixes, retries, and new versions. It must 
   }
   ```
 
-  Full-stack example:
+- `artifact`: built static ZIP with `index.html` at the root.
 
-  ```json
-  {
-    "version": 2,
-    "project_name": "校园助手",
-    "kind": "fullstack",
-    "preset": "flask",
-    "database": "mysql",
-    "entrypoint": "app:app",
-    "healthcheck": "/health",
-    "needs_ai_gateway": true,
-    "source": "cytopia-deploy-skill"
-  }
-  ```
-
-- `artifact`: static ZIP with `index.html` at the root, or sanitized source ZIP for a supported full-stack preset.
-
-Full-stack presets are `fastapi`, `flask`, and `node`; databases are `postgresql`, `mysql`, `sqlite`, and `none`. Dockerfiles and Compose files are not uploaded. Hidden files, path traversal, symlinks, keys, oversized archives, and unsupported extensions fail publication.
+The server accepts only `kind=static`, `preset=static`, and `database=none`. Source/build manifests, backend code, databases, Dockerfiles, Compose files, hidden files, path traversal, symlinks, keys, oversized archives, and unsupported extensions are rejected before a project is created.
 
 Uploads are idempotent by artifact checksum plus normalized manifest. Repeating an identical upload returns the original `deployment_id` with `deduplicated: true`.
 

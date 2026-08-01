@@ -25,7 +25,6 @@ from pathlib import Path
 
 from preflight import (
     DeployPlan,
-    collect_files,
     collect_static_files,
     detect_plan,
     normalize_healthcheck,
@@ -35,7 +34,7 @@ from preflight import (
 
 DEFAULT_API_BASE = os.getenv("CYTOPIA_DEPLOY_API", "https://summercamp.godpenai.com").rstrip("/")
 TERMINAL_STATUSES = {"published", "failed"}
-CLIENT_VERSION = "2.1.0"
+CLIENT_VERSION = "2.2.0"
 
 
 def request_json(
@@ -509,18 +508,13 @@ def main() -> int:
     parser.add_argument("--project-name", required=True)
     parser.add_argument("--dist", type=Path)
     parser.add_argument("--build-command")
-    parser.add_argument("--preset", choices=("static", "fastapi", "flask", "node"))
-    parser.add_argument("--database", choices=("auto", "none", "sqlite", "postgresql", "mysql"), default="auto")
-    parser.add_argument("--entrypoint")
-    parser.add_argument("--healthcheck")
-    parser.add_argument(
-        "--allow-static-export",
-        action="store_true",
-        help="显式允许将检测为全栈的项目部署为静态导出",
-    )
-    parser.add_argument(
-        "--static-export-reason",
-        help="说明静态导出为何不依赖后端和数据库",
+    parser.set_defaults(
+        preset=None,
+        database="auto",
+        entrypoint=None,
+        healthcheck=None,
+        allow_static_export=False,
+        static_export_reason=None,
     )
     parser.add_argument("--api-base", default=DEFAULT_API_BASE)
     parser.add_argument("--no-open", action="store_true")
@@ -536,6 +530,10 @@ def main() -> int:
             + "。请移除密钥并改用 /__camp/ai/chat。"
         )
     detected_plan = detect_plan(project_dir)
+    if detected_plan.kind != "static":
+        raise ValueError(
+            "本期训练营只发布静态网站。请移除后端、数据库和运行时依赖，并在本地生成包含 index.html 的静态项目。"
+        )
     source_commit, source_dirty = source_git_state(project_dir)
     static_export_reason = guard_static_downgrade(
         detected_plan,
@@ -589,9 +587,13 @@ def main() -> int:
     else:
         output_dir = plan.output_dir or project_dir
         build_command = args.build_command if args.build_command is not None else plan.build_command
+    if plan.kind != "static" or plan.preset != "static" or plan.database != "none":
+        raise ValueError(
+            "本期训练营只发布本地构建后的静态产物；后端进程、数据库和容器配置不会上传或执行。"
+        )
     run_build(build_command, project_dir)
     require_semantic_preflight(project_dir, plan, output_dir=output_dir)
-    files = collect_static_files(output_dir) if plan.kind == "static" else collect_files(project_dir, kind="fullstack")
+    files = collect_static_files(output_dir)
     total_bytes = sum(item.size for item in files)
     print(
         f"[preflight] PASS kind={plan.kind} preset={plan.preset} database={plan.database} "
@@ -629,14 +631,12 @@ def main() -> int:
             open_browser=not args.no_open,
         )
         manifest = {
-            "version": 2 if plan.kind == "fullstack" else 1,
+            "version": 1,
             "project_name": args.project_name,
             "entry": "index.html",
             "kind": plan.kind,
             "preset": plan.preset,
             "database": plan.database,
-            "entrypoint": plan.entrypoint,
-            "healthcheck": plan.healthcheck,
             "spa": True,
             "needs_ai_gateway": True,
             "source": "cytopia-deploy-skill",
@@ -660,8 +660,8 @@ def main() -> int:
         raise RuntimeError(job.get("error") or "部署失败")
     http_verification = verify_public_site(
         job["url"],
-        kind=plan.kind,
-        healthcheck=plan.healthcheck,
+        kind="static",
+        healthcheck="",
     )
     print(
         "[verify] PASS "

@@ -289,6 +289,36 @@ def test_fullstack_static_downgrade_requires_explicit_reason():
     assert reason == "后端功能已移除，数据为构建时快照"
 
 
+def test_deploy_client_rejects_runtime_project_before_authorization(tmp_path: Path, monkeypatch):
+    import deploy
+
+    (tmp_path / "requirements.txt").write_text("Flask==3.1.1\n", encoding="utf-8")
+    (tmp_path / "app.py").write_text(
+        "from flask import Flask\napp = Flask(__name__)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "deploy.py",
+            "--project-dir",
+            str(tmp_path),
+            "--project-name",
+            "runtime-project",
+            "--dry-run",
+        ],
+    )
+    monkeypatch.setattr(
+        deploy,
+        "resolve_deploy_session",
+        lambda *_args, **_kwargs: pytest.fail("静态边界失败时不应发起授权"),
+    )
+
+    with pytest.raises(ValueError, match="只发布静态网站"):
+        deploy.main()
+
+
 def test_http_decoder_rejects_mismatched_gzip_header():
     import deploy
 

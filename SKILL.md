@@ -1,72 +1,54 @@
 ---
 name: cytopia-deploy
-description: Build, preflight, authorize, and publish a static or full-stack student project to the Cytopia Summer Camp without exposing infrastructure or model keys. Supports HTML, React, Vue, FastAPI, Flask, and Node.js with managed PostgreSQL, MySQL, or SQLite. Never deploy student Dockerfiles or Compose files.
+description: Build, preflight, authorize, and publish a static student web project to the Cytopia Summer Camp without exposing infrastructure or model keys. Use when a learner asks to deploy, publish, go live, redeploy, obtain a camp domain, roll back, or use the camp AI gateway. Supports plain HTML and locally built frontend projects such as React or Vue; never uploads or executes student backends, databases, Dockerfiles, Compose files, or server processes.
 ---
 
 # Cytopia Deploy
 
-Publish a student project through the training-camp deployment control plane. Keep every server, DNS, and model credential on the server.
+Publish locally built static output through the training-camp deployment control plane. Keep every server, DNS, storage, and model credential on the server.
 
-## Safety boundary
+## Non-negotiable boundary
 
-- Never request, read, copy, print, or store an SSH key, DNS AccessKey, model API key, or platform admin password.
-- Never add a secret to the project, this Skill, a prompt, a screenshot, or a Git commit.
-- Upload static output for frontend-only projects or sanitized source for supported full-stack projects. Do not upload `.env`, credentials, local databases, Dockerfiles, Compose files, private keys, dependency directories, or caches.
-- Full-stack code runs only through the platform presets `fastapi`, `flask`, and `node`; never request arbitrary container privileges.
-- Never turn a detected full-stack project into a static deployment merely because `dist/`, `build/`, or `out/` exists. `--dist` and `--preset static` are not classification shortcuts.
-- A deliberate full-stack-to-static export requires both `--allow-static-export` and a concrete `--static-export-reason`. Confirm first that the export contains no API route, server dependency, database access, client-side password, unresolved public secret, or localhost URL.
-- Treat the browser device code as a one-time confirmation. Exchange it for a narrowly scoped deployment session that lasts at most eight hours.
-- Store the session only in the operating system's user-protected state (Windows DPAPI or a user-only state file). Never store it in the learner project, prompt, screenshot, log, or Git commit.
-- Stop if preflight reports a suspected secret. Help the learner remove the secret or replace the integration with `/__camp/ai/chat`.
+- Never request, read, copy, print, or store an SSH key, DNS AccessKey, object-storage key, model API key, or platform administrator password.
+- Never add a secret to the learner project, this Skill, a prompt, a screenshot, a log, or a Git commit.
+- Upload only built static output. Reject `.env`, source/build manifests, backend code, databases, Dockerfiles, Compose files, private keys, dependency directories, and caches.
+- Do not execute or upload a learner backend, container configuration, database migration, or arbitrary server command. If the project depends on a backend, explain that this release supports static output only and help move AI calls to `/__camp/ai/chat`.
+- Stop on suspected secrets or unresolved localhost URLs. Fix the project before authorizing or uploading.
 
-## Learner interaction contract
+## Learner contract
 
-The learner experience is **one prompt, one browser confirmation, one live URL**.
+The normal experience is **one prompt, one browser confirmation, one live URL**.
 
-- Own project inspection, project-name inference, build selection, output-directory detection, preflight, packaging, device-flow startup, upload, progress polling, online verification, and ordinary failure diagnosis.
-- Do not turn those internal actions into a checklist for the learner. Do not ask the learner to write a manifest, choose `dist/` versus `build/`, run the deployment client, copy a token into chat, configure a domain, or test a technical endpoint.
-- Ask a clarifying question only when two genuinely different projects or output directories remain plausible after inspection. Otherwise make the safe choice and proceed.
-- The only expected learner action is confirming their training-camp identity once in the browser on the current device. Fixes, retries, and later versions reuse that authorization for up to eight hours. The learner never gives the agent an account password or infrastructure credential.
-- After publication, perform the verification yourself and return a short result: live URL, deployment ID, checks passed, and any learner-visible limitation.
-- For a later release, interpret “重新部署当前项目” as the same workflow. Reuse the stable hostname automatically.
+- Own project inspection, project-name inference, local build, output-directory detection, manifest generation, preflight, packaging, authorization, upload, progress polling, verification, retries, and ordinary failure diagnosis.
+- Do not ask the learner to write a manifest, choose `dist/` versus `build/`, run the client, copy a token into chat, configure DNS, or test technical endpoints.
+- Ask only when two genuinely different projects or output directories remain plausible after inspection.
+- Confirm the learner's training-camp identity once in the browser on the current device. Fixes, retries, and later versions reuse that scoped session for up to eight hours.
+- Store the session only in operating-system-protected user state: Windows DPAPI or a user-only state file. Never store it in the learner project.
+- After publication, return only the live URL, deployment ID, checks passed, and any learner-visible limitation.
 
-## Deploy workflow
+## Workflow
 
-1. Inspect and classify the project:
-   - Plain HTML: the project directory containing `index.html`.
-   - React/Vue frontend only: build and upload `dist/`, `build/`, or `out/`.
-   - FastAPI or Flask: upload sanitized Python source and `requirements.txt`.
-   - Node.js: upload sanitized source when `package.json` has a supported server framework and `start`.
-   - Detect PostgreSQL, MySQL, or SQLite; inspect code and pass `--database` if ambiguous.
-   - Preserve the detector evidence. Every upload records the client version, Skill fingerprint, classification reason, override status/reason, and source Git commit/dirty state.
-   - Treat semantic-preflight failures as blockers. In particular, do not ship client-visible passwords or secrets, unresolved `process.env`/`import.meta.env`, loopback URLs, or API/database code in a static artifact.
-2. Run the deterministic deploy client:
+1. Inspect the project and identify static output:
+   - Plain HTML: use the directory containing `index.html`.
+   - React/Vue or another frontend build: run the existing build script, then use `dist/`, `build/`, or `out/`.
+   - If server routes, database access, or a runtime process are required, stop. Do not downgrade the product silently.
+2. Run the client:
 
    ```powershell
    python -X utf8 scripts/deploy.py --project-dir "<project>" --project-name "<name>"
    ```
 
-   Pass `--preset`, `--database`, `--entrypoint`, or `--healthcheck` when detection is ambiguous. Pass `--dry-run --json` to inspect the deployment plan without uploading.
-3. Let the client reuse the current device's valid deployment session. Only when no valid session exists, show the learner the device code and browser URL printed by the script. Explain that this grants the current device permission to deploy only the current team project for at most eight hours and reveals no infrastructure secret.
-4. Continue waiting while the script uploads and polls. Do not ask the learner to copy a token back into chat.
-5. On success, return the complete live URL and verify:
-   - let the client complete its automatic HTTP verification of the home page, same-origin JavaScript/CSS assets, and SPA deep link or full-stack health endpoint;
-   - open the public URL with the Browser tool and verify that meaningful DOM content renders rather than a blank screen or permanent loading state;
-   - inspect browser console errors and failed network requests;
-   - verify both desktop and mobile viewports;
-   - a deep link falls back to `index.html` for SPA projects;
-   - the configured health endpoint succeeds for full-stack projects;
-   - database-backed create/read behavior survives one redeploy;
-   - `GET /__camp/ai/health` reports the project and AI availability when the app needs AI.
-   - The platform Runner must observe 60 continuous seconds of successful health checks with no container restart before switching traffic. A first successful response is not enough.
-   - Do not report deployment success until both automatic HTTP checks and Browser verification pass. `browser_verification_required: true` in client output is an instruction to the agent, not a learner task.
-6. On failure, read the reported stage and use [references/troubleshooting.md](references/troubleshooting.md). Fix the project and rerun the same deploy command. Reuse the existing session; never ask for another confirmation while it remains valid. Identical uploads are idempotent and return the existing deployment instead of creating duplicate work.
+   Use `--dist "<directory>"` only when output detection is ambiguous. Use `--dry-run --json` for build, security, and packaging checks without upload.
+3. Let the client reuse a valid local deployment session. Only when none exists, show the device code and browser URL. Explain that the confirmation grants a short, team-scoped deployment session and reveals no infrastructure credential.
+4. Continue automatically while the client uploads and polls. On failure, preserve the stage, error code, and safe filename evidence; fix and rerun with the same valid session.
+5. On success, let the client verify the homepage, same-origin JavaScript/CSS assets, and SPA deep link. Then use the Browser tool to confirm meaningful content, console/network health, and desktop/mobile rendering.
+6. If the app uses AI, verify `GET /__camp/ai/health`. Frontend code must call the same-origin gateway and contain no provider URL, model name, or key.
 
-Treat steps 1–6 as internal Skill execution. Summarize them after completion; never assign them to the learner as homework.
+Treat this workflow as internal execution, not learner homework. Never report success before HTTP and browser verification pass.
 
-## AI gateway contract
+## AI gateway
 
-Frontend code calls the same deployment origin:
+Frontend code calls its own deployment origin:
 
 ```js
 const response = await fetch("/__camp/ai/chat", {
@@ -80,12 +62,12 @@ const result = await response.json();
 const answer = result.data.message;
 ```
 
-Do not add a model name, Base URL, or API key. The server selects the approved model, enforces the project quota, and owns the upstream credential.
+The server selects the model, enforces quota, and owns the upstream credential.
 
-## Redeploy and rollback
+## Versions and rollback
 
-Run the same deploy command for a new version. The project keeps its hostname and database. The server switches versions only after build, database provisioning, startup, and health validation.
+Run the same command to publish a new version. The project keeps its stable hostname, and identical uploads are deduplicated.
 
-Rollback is a browser-account action in the training platform. Do not attempt SSH or direct filesystem rollback.
+Rollback is a signed-in browser action in the training platform. Never attempt SSH or direct filesystem rollback.
 
-Read [references/api.md](references/api.md) only when diagnosing protocol details or extending the client.
+Read [references/api.md](references/api.md) only for protocol diagnosis or client maintenance. Read [references/troubleshooting.md](references/troubleshooting.md) when a deployment fails.
